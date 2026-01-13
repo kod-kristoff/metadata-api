@@ -276,24 +276,10 @@ def _update_collections(collection_mappings: dict, all_resources: dict) -> dict:
                     res.pop("in_collections")
             continue
 
-        # Expand wildcards in resource references (e.g. "kubhist-*")
+        # Resolve wildcards and type prefixes in resource references (e.g. "corpus/kubhist-*")
         expanded_res_list = []
         for res_ref in res_list:
-            if "*" in res_ref or "?" in res_ref:
-                matches = [res_id for res_id in all_resources if _wildcard_match(res_ref, res_id)]
-                logger.debug(
-                    "Expanding wildcard '%s' in collection '%s' to matches: %s", res_ref, collection, ", ".join(matches)
-                )
-                if not matches:
-                    logger.warning(
-                        "The wildcard '%s' in collection '%s' did not match any resources. "
-                        "Removing from collection.",
-                        res_ref,
-                        collection,
-                    )
-                expanded_res_list.extend(matches)
-            else:
-                expanded_res_list.append(res_ref)
+            expanded_res_list.extend(_expand_res_ref(res_ref, collection, all_resources))
         expanded_res_list = sorted(set(expanded_res_list))
 
         # Remove resource IDs for non-existing resources
@@ -425,6 +411,48 @@ def _get_lang_names(langcode: str) -> tuple[str, str]:
     english_name = l.name
     swedish_name = SWEDISH.gettext(english_name).lower()
     return english_name, swedish_name
+
+
+def _log_wildcard_expansion(res_ref: str, matches: list[str], collection: str) -> None:
+    logger.debug(
+        "Expanding wildcard '%s' in collection '%s' to matches: %s",
+        res_ref,
+        collection,
+        ", ".join(matches),
+    )
+    if not matches:
+        logger.warning(
+            "The wildcard '%s' in collection '%s' did not match any resources. "
+            "Removing from collection.",
+            res_ref,
+            collection,
+        )
+
+
+def _expand_res_ref(res_ref: str, collection: str, all_resources: dict) -> list[str]:
+    """Expand a resource reference with possible wildcards to a list of matching resource IDs.
+
+    params:
+        res_ref: The resource reference string, which may contain wildcards or a type prefix (e.g. "corpus/*").
+        collection: The collection ID (used for logging).
+        all_resources: Dictionary of all resources {resource_id: resource_dict, ...}.
+    """
+    if "/" in res_ref:
+        res_type, res_id_part = res_ref.split("/", 1)
+        matches = [
+            res_id
+            for res_id, res_data in all_resources.items()
+            if res_data.get("type") == res_type and _wildcard_match(res_id_part, res_id)
+        ]
+        _log_wildcard_expansion(res_ref, matches, collection)
+        return matches
+
+    if "*" in res_ref or "?" in res_ref:
+        matches = [res_id for res_id in all_resources if _wildcard_match(res_ref, res_id)]
+        _log_wildcard_expansion(res_ref, matches, collection)
+        return matches
+
+    return [res_ref]
 
 
 def _wildcard_match(pattern: str, value: str) -> bool:
