@@ -31,6 +31,7 @@ def renew_cache_task(
     debug: bool,
     offline: bool,
     payload: Any | None = None,
+    purge_license_cache: bool = False,
 ) -> bool:
     """Renew the cache by re-parsing YAML files and updating the cache.
 
@@ -40,6 +41,7 @@ def renew_cache_task(
         debug: Print debug info while parsing YAML files.
         offline: Skip getting file info for downloadables when parsing YAML files.
         payload: payload from the GitHub webhook.
+        purge_license_cache: If True, re-download the license information before parsing YAML files.
 
     Returns:
         Whether the cache renewal was successful.
@@ -89,7 +91,7 @@ def renew_cache_task(
                         changed_files.extend(commit.get("modified", []))
                         changed_files.extend(commit.get("removed", []))
 
-                    # If too many files were changed, GitHub will not provide a complete list. Update all data in this case.
+                    # If too many files were changed, GitHub will not provide a complete list, so update all data.
                     file_limit = settings.GITHUB_FILE_LIMIT
                     if len(changed_files) > file_limit:
                         resource_paths = None
@@ -117,7 +119,11 @@ def renew_cache_task(
             logger.info("Calling 'process_resources'...")
             # Update data and rebuild all JSON files (reprocess all data if resource_paths is None)
             process_resources(
-                resource_paths=resource_paths, validate=True, debug=debug, offline=offline
+                resource_paths=resource_paths,
+                validate=True,
+                debug=debug,
+                offline=offline,
+                purge_license_cache=purge_license_cache,
             )
             logger.info("Cache renewal task: process_resources completed.")
 

@@ -10,10 +10,14 @@ Changelog](https://keepachangelog.com/en/1.0.0/).
 - Added atomic tracking of pending cache renewal tasks using Redis to prevent overload.
 - Added support for wildcards using simple glob-style patterns (`*` and `?`) in collection resource references.
 - Added support for type prefixes in collection resource references (e.g. `corpus/*`).
+- Added `purge-license-cache` query parameter to `/renew-cache` route to allow re-downloading license information
+  from [SPDX](https://github.com/spdx/license-list-data) before parsing YAML files.
 
 ### Changed
 
 - Improved error messages from `gen_pids.py` and `parse_yaml.py` for better clarity.
+- All `license` fields in the metadata are now transformed into objects containing `id`, `name`, and `url` fields with
+  license details from [SPDX](https://github.com/spdx/license-list-data).
 
 ## [3.2.0] - 2025-12-03
 

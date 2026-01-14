@@ -9,6 +9,7 @@ import logging
 import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pycountry
@@ -29,6 +30,7 @@ def process_resources(
     debug: bool = False,
     offline: bool = False,
     validate: bool = False,
+    purge_license_cache: bool = False,
 ) -> None:
     """Read YAML metadata files, compile and prepare information for the API (main wrapper).
 
@@ -38,6 +40,7 @@ def process_resources(
         debug: Log debug info while parsing YAML files.
         offline: Skip getting file info for downloadables.
         validate: Validate metadata using schema.
+        purge_license_cache: If True, re-download the license information even if the file exists.
     """
     resource_types = [rt for rt in settings.RESOURCE_TYPES if rt != "collection"]
     all_resources = {}  # {resource_id: resource_dict, ...}
@@ -46,6 +49,9 @@ def process_resources(
     collections_file = settings.STATIC / settings.COLLECTIONS_FILE
     collection_mappings = {}  # {collection_id: [resource_id, ...]}
     failed_files = []  # List of files that failed to process, used for logging
+
+    # Load license info
+    license_info = _get_license_info(purge_cache=purge_license_cache)
 
     if debug:
         logger.setLevel(logging.DEBUG)
@@ -86,6 +92,7 @@ def process_resources(
             collection_mappings,
             resource_schema,
             localizations,
+            license_info,
             offline=offline,
         )
         if not resource_dict:
@@ -133,6 +140,7 @@ def _process_yaml_file(
     collection_mappings: dict,
     resource_schema: dict | None,
     localizations: dict,
+    license_info: dict,
     offline: bool = False,
 ) -> tuple[str, dict, bool]:
     """Process a single YAML file and extract/process resource information.
@@ -146,6 +154,7 @@ def _process_yaml_file(
         resource_schema: JSON schema for validation.
         localizations: Dictionary of localizations.
         offline: Skip getting file info for downloadables.
+        license_info: License information dictionary.
 
     Returns:
         The ID of the resource, the processed resource data and a bool stating whether the process was successful.
@@ -169,7 +178,7 @@ def _process_yaml_file(
         logger.debug("Processing '%s'", filepath)
         with filepath.open(encoding="utf-8") as f:
             res = yaml.safe_load(f)
-            res_type = res.get("type", "")
+            res_type = filepath.parent.name  # Resource type, used for logging
 
             # Validate YAML
             if resource_schema is not None:
@@ -187,6 +196,9 @@ def _process_yaml_file(
             for k, v in res.get("size", {}).items():
                 if not str(v).isdigit():
                     res["size"][k] = 0
+
+            # Translate license IDs to full license info recursively
+            _translate_licenses(res, license_info, res_type, fileid)
 
             # Update resouce_texts and remove descriptions for now
             if res.get("description", {}).get("swe", "").strip():
@@ -432,7 +444,7 @@ def _log_wildcard_expansion(res_ref: str, matches: list[str], collection: str) -
 def _expand_res_ref(res_ref: str, collection: str, all_resources: dict) -> list[str]:
     """Expand a resource reference with possible wildcards to a list of matching resource IDs.
 
-    params:
+    Args:
         res_ref: The resource reference string, which may contain wildcards or a type prefix (e.g. "corpus/*").
         collection: The collection ID (used for logging).
         all_resources: Dictionary of all resources {resource_id: resource_dict, ...}.
@@ -470,6 +482,85 @@ def _wildcard_match(pattern: str, value: str) -> bool:
     return bool(re.fullmatch(regex, value))
 
 
+def _get_license_info(purge_cache: bool = False) -> dict:
+    """Get license information, downloading it if necessary, and parse it into a dictionary.
+
+    Args:
+        purge_cache: If True, re-download the license information even if the file exists.
+
+    Returns:
+        License information as a dictionary.
+    """
+    license_file = settings.STATIC / settings.LICENSE_INFO_FILE
+
+    if purge_cache or not license_file.exists():
+        # Download license information from URL and save to static folder
+        try:
+            res = requests.get(settings.LICENSE_INFO_URL)
+            res.raise_for_status()
+            license_data = res.json()
+            # Convert license list to a dictionary for easier lookup, keeping only licenseId, name, and url
+            parsed_license_data = {
+                lic["licenseId"]: {"id": lic["licenseId"], "name": lic["name"], "url": lic["detailsUrl"]}
+                for lic in license_data.get("licenses", [])
+            }
+            license_file = settings.STATIC / settings.LICENSE_INFO_FILE
+            _write_json(license_file, parsed_license_data)
+            logger.info("Downloaded license information to '%s'", license_file)
+        except Exception:
+            logger.exception("Failed to download license information from '%s'", settings.LICENSE_INFO_URL)
+
+    # Load license information from file
+    try:
+        with license_file.open(encoding="utf-8") as f:
+            license_info = json.load(f)
+    except Exception:
+        logger.exception("Failed to load license information from '%s'", license_file)
+        return {}
+
+    return license_info
+
+
+def _translate_licenses(item: Any, license_info: dict, res_type: str, fileid: str) -> None:
+    """Recursively translate license IDs in the item to full license info.
+
+    Args:
+        item: The item (dict, list, or other) to process.
+        license_info: License information dictionary.
+        res_type: Type of the resource (used for logging).
+        fileid: The file ID (resource ID) (used for logging).
+    """
+    if isinstance(item, dict):
+        license_value = item.get("license")
+        if isinstance(license_value, str) and license_value:
+            if license_value == settings.LICENSE_OTHER_NAME:
+                license_name = item.get("license_other", "")
+                if not license_name:
+                    logger.warning(
+                        "LicenseRef-Other missing 'license_other' field (resource: '%s/%s')", res_type, fileid
+                    )
+                    license_name = "Other"
+                item["license"] = {"id": settings.LICENSE_OTHER_NAME, "name": license_name, "url": ""}
+                item.pop("license_other", None)
+            else:
+                license_data = license_info.get(license_value)
+                if license_data:
+                    item["license"] = license_data
+                else:
+                    item["license"] = {"id": license_value, "name": license_value, "url": ""}
+                    logger.warning(
+                        "License ID '%s' not found in license info (resource: '%s/%s')", license_value, res_type, fileid
+                    )
+
+        for key, value in list(item.items()):
+            if key == "license":
+                continue
+            _translate_licenses(value, license_info, res_type, fileid)
+    elif isinstance(item, list):
+        for elem in item:
+            _translate_licenses(elem, license_info, res_type, fileid)
+
+
 def _write_json(filename: Path, data: dict) -> None:
     """Write data as JSON to a temporary file, and afterwards move the file into place.
 
@@ -501,6 +592,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resource-paths", type=str, help="Comma-separated paths to the resources to update (format: 'type/id')"
     )
+    parser.add_argument(
+        "--purge-license-cache",
+        action="store_true",
+        help="Re-download the license information even if the file exists",
+    )
 
     # Parse command line arguments
     args = parser.parse_args()
@@ -510,4 +606,5 @@ if __name__ == "__main__":
         debug=args.debug,
         offline=args.offline,
         validate=args.validate,
+        purge_license_cache=args.purge_license_cache,
     )

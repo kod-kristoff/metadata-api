@@ -174,7 +174,8 @@ def _renew_cache(
     resource_paths: str | None,
     debug: bool,
     offline: bool,
-    payload: dict | None,
+    payload: dict | None = None,
+    purge_license_cache: bool = False,
 ) -> JSONResponse:
     paths_list = resource_paths.split(",") if resource_paths else None
 
@@ -193,6 +194,7 @@ def _renew_cache(
             "debug": debug,
             "offline": offline,
             "payload": payload if request_method == "POST" else None,
+            "purge_license_cache": purge_license_cache,
         })
     except Exception as e:
         # Roll back the slot if enqueue failed
@@ -217,13 +219,18 @@ def renew_cache_get(
     ),
     debug: bool = Query(default=False, description="If true, log debug info while parsing YAML files."),
     offline: bool = Query(default=False, description="If true, skip getting file info for downloadables."),
+    purge_license_cache: bool = Query(
+        default=False,
+        alias="purge-license-cache",
+        description="If true, re-download the license information before parsing YAML files.",
+    ),
 ) -> JSONResponse:
     """Trigger cache renewal as a background job (GET).
 
     Resources specified in the "resource-paths" query parameter will be reprocessed. If no resources are specified, all
     resources are reprocessed.
     """
-    return _renew_cache("GET", resource_paths, debug, offline, payload=None)
+    return _renew_cache("GET", resource_paths, debug, offline, purge_license_cache=purge_license_cache)
 
 
 @router.post(
