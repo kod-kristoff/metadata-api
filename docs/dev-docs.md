@@ -17,6 +17,9 @@ This project contains the following main components:
 - [**`gen_pids.sh`**](gen_pids.sh) - A shell script that runs periodically on the server (via cron) and calls
   [`gen_pids.py`](/gen_pids/gen_pids.py).
 
+Furthermore there are some scripts in the `batch_jobs/` directory that are used for batch processing of resources, e.g.
+for adding new fields to all metadata YAML files or for extracting information.
+
 ## Logging
 
 Logging is configured via environment variables in `metadata_api/settings.py`. Important variables:

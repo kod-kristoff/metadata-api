@@ -345,7 +345,7 @@ def _get_schema(filepath: Path) -> dict | None:
     return schema
 
 
-def _get_download_metadata(url: str, name: str, res_type: Path) -> tuple[int | None, str | None]:
+def _get_download_metadata(url: str, name: str, res_type: str) -> tuple[int | None, str | None]:
     """Check headers of file from URL and return the file size and last modified date.
 
     Args:

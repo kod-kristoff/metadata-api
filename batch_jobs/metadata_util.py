@@ -15,7 +15,6 @@ import argparse
 import datetime
 import sys
 from pathlib import Path
-from typing import Optional
 
 import requests
 import yaml
@@ -35,7 +34,7 @@ parser.add_argument("--updated",
 # Export
 
 
-def get_key_value(dictionary: dict, key: str, key2: Optional[str] = None) -> str:
+def get_key_value(dictionary: dict, key: str, key2: str | None = None) -> str:
     """Return key value from dictionary, else empty string."""
     if (key2 is None):
         value = dictionary.get(key, "")
@@ -53,7 +52,7 @@ def export_resources_to_tsv() -> None:
     file_export = Path("../metadata/export.tsv")
     EXPORT_TAB = "\t"
     EXPORT_NEWLINE = "\n"
-    with file_export.open("w") as file_csv:
+    with file_export.open("w", encoding="utf-8") as file_csv:
         for filepath in sorted(YAML_DIR.glob("**/*.yaml")):
             res_id = filepath.stem
             with filepath.open(encoding="utf-8") as file_yaml:
@@ -81,30 +80,30 @@ def str_presenter(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
     return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
 
-yaml.add_representer(str, str_presenter)
-yaml.representer.SafeRepresenter.add_representer(str, str_presenter)
-
-
 class IndentDumper(yaml.Dumper):
     """Indent list items (for preserving format).
 
     https://reorx.com/blog/python-yaml-tips/#enhance-list-indentation-dump
     """
-    def increase_indent(self, flow: bool = False) -> int:
+    def increase_indent(self, flow: bool = False) -> None:
         """Increase the indentation level."""
         return super().increase_indent(flow, False)
 
 
-def get_download_date_(url: str, name: str) -> Optional[datetime.date]:
+yaml.add_representer(str, str_presenter)
+IndentDumper.add_representer(str, str_presenter)
+
+
+def get_download_date_(url: str, name: str) -> datetime.date | None:
     """Check headers of file from url and return the last modified date."""
     res = requests.head(url)
     date = res.headers.get("Last-Modified")
 
     if date:
-        date = datetime.date.strptime(date, "%a, %d %b %Y %H:%M:%S %Z")  # .strftime("%Y-%m-%d")
+        return datetime.datetime.strptime(date, "%a, %d %b %Y %H:%M:%S %Z").date()  # .strftime("%Y-%m-%d")
     if res.status_code == 404:  # noqa: PLR2004
         print(f"Error: Could not find downloadable for '{name}': {url}", file=sys.stderr)
-    return date
+    return None
 
 
 YAML_DIR = Path("../metadata/yaml")
