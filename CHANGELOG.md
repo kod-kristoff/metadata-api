@@ -18,6 +18,7 @@ Changelog](https://keepachangelog.com/en/1.0.0/).
 - Improved error messages from `gen_pids.py` and `parse_yaml.py` for better clarity.
 - All `license` fields in the metadata are now transformed into objects containing `id`, `name`, and `url` fields with
   license details from [SPDX](https://github.com/spdx/license-list-data).
+- Moved batch programs from `tmp_scripts/` to `batch_jobs/` directory and refactored code in `metadata_util.py`.
 
 ## [3.2.0] - 2025-12-03
 
