@@ -10,8 +10,10 @@ import datetime
 import gettext
 import json
 import logging
+import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pycountry
@@ -32,6 +34,7 @@ def process_resources(
     debug: bool = False,
     offline: bool = False,
     validate: bool = False,
+    purge_license_cache: bool = False,
 ) -> None:
     """Read YAML metadata files, compile and prepare information for the API (main wrapper).
 
@@ -41,82 +44,87 @@ def process_resources(
         debug: Log debug info while parsing YAML files.
         offline: Skip getting file info for downloadables.
         validate: Validate metadata using schema.
+        purge_license_cache: If True, re-download the license information even if the file exists.
     """
-    resource_types = [Path(i).stem for i in settings.RESOURCES.values()]
-    all_resources = {}
-    resource_texts = defaultdict(dict)
+    resource_types = [rt for rt in settings.RESOURCE_TYPES if rt != "collection"]
+    all_resources = {}  # {resource_id: resource_dict, ...}
     resource_text_file = settings.STATIC / settings.RESOURCE_TEXTS_FILE
+    resource_texts = defaultdict(dict)  # {resource_id: {'swe': description, 'eng': description}, ...}
     collections_file = settings.STATIC / settings.COLLECTIONS_FILE
-    collection_mappings = {}
-    metadata_dir = settings.METADATA_DIR
-    localizations = get_localizations(metadata_dir / settings.LOCALIZATIONS_DIR)
+    collection_mappings = {}  # {collection_id: [resource_id, ...]}
+    failed_files = []  # List of files that failed to process, used for logging
 
-    failed_files = []
+    # Load license info
+    license_info = _get_license_info(purge_cache=purge_license_cache)
 
     if debug:
         logger.setLevel(logging.DEBUG)
 
+    resource_schema = None
     if validate:
-        resource_schema = get_schema(metadata_dir / settings.SCHEMA_FILE)
-        # YAML safe_load() - handle dates as strings
-        yaml.constructor.SafeConstructor.yaml_constructors["tag:yaml.org,2002:timestamp"] = (
-            yaml.constructor.SafeConstructor.yaml_constructors["tag:yaml.org,2002:str"]
-        )
-    else:
-        resource_schema = None
+        try:
+            resource_schema = _get_schema(settings.METADATA_DIR / settings.SCHEMA_FILE)
+            # YAML safe_load() - handle dates as strings
+            yaml.constructor.SafeConstructor.yaml_constructors["tag:yaml.org,2002:timestamp"] = (
+                yaml.constructor.SafeConstructor.yaml_constructors["tag:yaml.org,2002:str"]
+            )
+        except Exception:
+            logger.exception("Failed to load schema, skipping validation")
+            resource_schema = None
 
     if not resource_paths:
-        filepaths = sorted((metadata_dir / settings.YAML_DIR).rglob("*.yaml"))
+        # No resource_paths given: process all YAML files
+        filepaths = sorted((settings.METADATA_DIR / settings.YAML_DIR).rglob("*.yaml"))
     else:
         # When processing a single YAML file: set filepaths and load existing resource data
-        filepaths = [metadata_dir / settings.YAML_DIR / f"{i}.yaml" for i in resource_paths]
-
+        filepaths = [settings.METADATA_DIR / settings.YAML_DIR / f"{i}.yaml" for i in resource_paths]
+        # Load existing resource data
         for resource_type in resource_types:
             with (settings.STATIC / f"{resource_type}.json").open(encoding="utf-8") as f:
                 all_resources.update(json.load(f))
         with resource_text_file.open(encoding="utf-8") as f:
             resource_texts.update(json.load(f))
         with collections_file.open(encoding="utf-8") as f:
-            collections_data = json.load(f)
-            collection_mappings = {k: v.get("resources", []) for k, v in collections_data.items()}
+            collection_mappings = {k: v.get("resources", []) for k, v in json.load(f).items()}
 
+    localizations = _get_localizations(settings.METADATA_DIR / settings.LOCALIZATIONS_DIR)
     # Process YAML file(s) and update all_resources, collection_mappings, and resource_texts
     for filepath in filepaths:
-        resource_id, resource_dict, success = process_yaml_file(
+        resource_id, resource_dict, success = _process_yaml_file(
             filepath,
             resource_texts,
             collection_mappings,
             resource_schema,
             localizations,
+            license_info,
             offline=offline,
-            validate=validate,
         )
         if not resource_dict:
-            # Resource dict is emtpty: file was deleted and should be removed from the data
+            # Resource dict is empty: file was deleted and should be removed from the data
             all_resources.pop(resource_id, None)
         else:
             all_resources[resource_id] = resource_dict
         if success is False:
             failed_files.append(str(Path(filepath.parent.name) / filepath.stem))
 
-    # Sort alphabetically by key
+    # Sort resources alphabetically by ID
     all_resources = dict(sorted(all_resources.items()))
 
-    # Get collections data from all_resources and update collections with sizes and resource lists
-    collections_data = {k: v for k, v in all_resources.items() if v.get("collection")}
-    update_collections(collection_mappings, collections_data, all_resources)
-    write_json(collections_file, collections_data)
+    # Get collections_data and update all_resources with in_collections info
+    collections_data = _update_collections(collection_mappings, all_resources)
+    _write_json(collections_file, collections_data)
 
-    # Dump resource texts as json
-    write_json(resource_text_file, resource_texts)
+    # Dump resource-texts json
+    _write_json(resource_text_file, resource_texts)
 
     # Update resource json files
     for resource_type in resource_types:
         res_json = {k: v for k, v in all_resources.items() if v.get("type", "") == resource_type}
-        # Set has_description for every resource and save as json.
-        set_description_bool(res_json, resource_texts)
-        write_json(settings.STATIC / f"{resource_type}.json", res_json)
+        # Set has_description for every resource and dump json
+        _set_description_bool(res_json, resource_texts)
+        _write_json(settings.STATIC / f"{resource_type}.json", res_json)
 
+    # Log summary
     messages = []
     if failed_files:
         messages.append(f"Failed to process: {', '.join(failed_files)}")
@@ -130,14 +138,14 @@ def process_resources(
     logger.info(message)
 
 
-def process_yaml_file(
+def _process_yaml_file(
     filepath: Path,
     resource_texts: defaultdict,
     collection_mappings: dict,
     resource_schema: dict | None,
     localizations: dict,
+    license_info: dict,
     offline: bool = False,
-    validate: bool = False,
 ) -> tuple[str, dict, bool]:
     """Process a single YAML file and extract/process resource information.
 
@@ -150,7 +158,7 @@ def process_yaml_file(
         resource_schema: JSON schema for validation.
         localizations: Dictionary of localizations.
         offline: Skip getting file info for downloadables.
-        validate: Validate metadata using schema.
+        license_info: License information dictionary.
 
     Returns:
         The ID of the resource, the processed resource data and a bool stating whether the process was successful.
@@ -174,10 +182,10 @@ def process_yaml_file(
         logger.debug("Processing '%s'", filepath)
         with filepath.open(encoding="utf-8") as f:
             res = yaml.safe_load(f)
-            res_type = res.get("type", "")
+            res_type = filepath.parent.name  # Resource type, used for logging
 
             # Validate YAML
-            if validate and resource_schema is not None:
+            if resource_schema is not None:
                 try:
                     jsonschema.validate(instance=res, schema=resource_schema)
                 except ValidationError as e:
@@ -193,6 +201,9 @@ def process_yaml_file(
                 if not str(v).isdigit():
                     res["size"][k] = 0
 
+            # Translate license IDs to full license info recursively
+            _translate_licenses(res, license_info, res_type, fileid)
+
             # Update resouce_texts and remove descriptions for now
             if res.get("description", {}).get("swe", "").strip():
                 resource_texts[fileid]["swe"] = res["description"]["swe"]
@@ -205,7 +216,7 @@ def process_yaml_file(
             for langcode in res.get("language_codes", []):
                 if langcode not in [l.get("code") for l in langs]:
                     try:
-                        english_name, swedish_name = get_lang_names(langcode)
+                        english_name, swedish_name = _get_lang_names(langcode)
                         langs.append({"code": langcode, "name": {"swe": swedish_name, "eng": english_name}})
                     except LookupError:
                         logger.error(
@@ -225,20 +236,21 @@ def process_yaml_file(
                 for d in res.get("downloads", []):
                     url = d.get("url")
                     if url and "size" not in d and "last-modified" not in d:
-                        size, date = get_download_metadata(url, fileid, res_type)
+                        size, date = _get_download_metadata(url, fileid, res_type)
                         d["size"] = size
                         d["last-modified"] = date
 
             processed_resource.update(res)
 
-            # Update collections dict
+            # Update collection_mappings
             if res.get("collection") is True:
+                # Resource is a collection: add its resources
                 collection_mappings[fileid] = collection_mappings.get(fileid, [])
                 if res.get("resources"):
                     collection_mappings[fileid].extend(res["resources"])
                     collection_mappings[fileid] = sorted(set(collection_mappings[fileid]))
-
             if res.get("in_collections"):
+                # Resource is part of one or more collections: add it to the collections' resources lists
                 for collection_id in res["in_collections"]:
                     collection_mappings[collection_id] = collection_mappings.get(collection_id, [])
                     collection_mappings[collection_id].append(fileid)
@@ -250,19 +262,24 @@ def process_yaml_file(
     return fileid, processed_resource, success
 
 
-def update_collections(collection_mappings: dict, collections_data: dict, all_resources: dict) -> None:
-    """Add sizes and resource lists to collections.
+def _update_collections(collection_mappings: dict, all_resources: dict) -> dict:
+    """Create collections_data dict and add resource lists and sizes (number of resources) to collections.
 
     Args:
         collection_mappings: Mappings of collections to resources.
-        collections_data: JSON data of collections.
         all_resources: Dictionary containing the data of all resources.
+
+    Returns:
+        The updated collections data. Modifies all_resources in-place to add in_collections info to resources.
     """
+    # Get data for all resources that are collections
+    collections_data = {k: v for k, v in all_resources.items() if v.get("collection")}
+
     for collection, res_list in collection_mappings.items():
         col = collections_data.get(collection)
         if not col:
             logger.warning(
-                "Collection '%s' is not defined but was referenced by the following resource: %s. "
+                "Collection '%s' is not defined but was referenced by the following resources: %s. "
                 "Removing collection from these resources.",
                 collection,
                 ", ".join(res_list),
@@ -275,9 +292,15 @@ def update_collections(collection_mappings: dict, collections_data: dict, all_re
                     res.pop("in_collections")
             continue
 
+        # Resolve wildcards and type prefixes in resource references (e.g. "corpus/kubhist-*")
+        expanded_res_list = []
+        for res_ref in res_list:
+            expanded_res_list.extend(_expand_res_ref(res_ref, collection, all_resources))
+        expanded_res_list = sorted(set(expanded_res_list))
+
         # Remove resource IDs for non-existing resources
-        new_res_list = [i for i in res_list if i in all_resources]
-        removed_resources = list(set(res_list).difference(set(new_res_list)))
+        new_res_list = [i for i in expanded_res_list if i in all_resources]
+        removed_resources = list(set(expanded_res_list).difference(set(new_res_list)))
         if removed_resources and len(removed_resources) == 1:
             logger.warning(
                 "The resource '%s' does not exist and was removed from the '%s' collection.",
@@ -297,15 +320,17 @@ def update_collections(collection_mappings: dict, collections_data: dict, all_re
             col["size"]["resources"] = len(new_res_list)
             col["resources"] = new_res_list
 
-            # Add in_collections info to json of the collection's resources
+            # Add in_collections info to resource json data (all_resources)
             for res_id in new_res_list:
                 res_item = all_resources.get(res_id)
                 if res_item and col_id not in res_item.get("in_collections", []):
                     res_item["in_collections"] = res_item.get("in_collections", [])
                     res_item["in_collections"].append(col_id)
 
+    return collections_data
 
-def get_schema(filepath: Path) -> dict | None:
+
+def _get_schema(filepath: Path) -> dict | None:
     """Load and return the JSON schema from the given file path.
 
     Args:
@@ -324,7 +349,7 @@ def get_schema(filepath: Path) -> dict | None:
     return schema
 
 
-def get_download_metadata(url: str, name: str, res_type: Path) -> tuple[int | None, str | None]:
+def _get_download_metadata(url: str, name: str, res_type: str) -> tuple[int | None, str | None]:
     """Check headers of file from URL and return the file size and last modified date.
 
     Args:
@@ -353,7 +378,7 @@ def get_download_metadata(url: str, name: str, res_type: Path) -> tuple[int | No
     return size, date
 
 
-def set_description_bool(resources: dict, resource_texts: defaultdict) -> None:
+def _set_description_bool(resources: dict, resource_texts: defaultdict) -> None:
     """Add bool 'has_description' for every resource.
 
     Args:
@@ -368,7 +393,7 @@ def set_description_bool(resources: dict, resource_texts: defaultdict) -> None:
             resource["has_description"] = True
 
 
-def get_localizations(localizations_dir: Path) -> dict:
+def _get_localizations(localizations_dir: Path) -> dict:
     """Read localizations from YAML files.
 
     Args:
@@ -387,7 +412,7 @@ def get_localizations(localizations_dir: Path) -> dict:
     return localizations
 
 
-def get_lang_names(langcode: str) -> tuple[str, str]:
+def _get_lang_names(langcode: str) -> tuple[str, str]:
     """Get English and Swedish name for language represented by langcode.
 
     Args:
@@ -404,7 +429,143 @@ def get_lang_names(langcode: str) -> tuple[str, str]:
     return english_name, swedish_name
 
 
-def write_json(filename: Path, data: dict) -> None:
+def _log_wildcard_expansion(res_ref: str, matches: list[str], collection: str) -> None:
+    logger.debug(
+        "Expanding wildcard '%s' in collection '%s' to matches: %s",
+        res_ref,
+        collection,
+        ", ".join(matches),
+    )
+    if not matches:
+        logger.warning(
+            "The wildcard '%s' in collection '%s' did not match any resources. "
+            "Removing from collection.",
+            res_ref,
+            collection,
+        )
+
+
+def _expand_res_ref(res_ref: str, collection: str, all_resources: dict) -> list[str]:
+    """Expand a resource reference with possible wildcards to a list of matching resource IDs.
+
+    Args:
+        res_ref: The resource reference string, which may contain wildcards or a type prefix (e.g. "corpus/*").
+        collection: The collection ID (used for logging).
+        all_resources: Dictionary of all resources {resource_id: resource_dict, ...}.
+    """
+    if "/" in res_ref:
+        res_type, res_id_part = res_ref.split("/", 1)
+        matches = [
+            res_id
+            for res_id, res_data in all_resources.items()
+            if res_data.get("type") == res_type and _wildcard_match(res_id_part, res_id)
+        ]
+        _log_wildcard_expansion(res_ref, matches, collection)
+        return matches
+
+    if "*" in res_ref or "?" in res_ref:
+        matches = [res_id for res_id in all_resources if _wildcard_match(res_ref, res_id)]
+        _log_wildcard_expansion(res_ref, matches, collection)
+        return matches
+
+    return [res_ref]
+
+
+def _wildcard_match(pattern: str, value: str) -> bool:
+    """Match simple glob-style patterns (* and ?) against a value.
+
+    Args:
+        pattern: The pattern containing wildcards.
+        value: The value to match against the pattern.
+
+    Returns:
+        Whether the value matches the pattern.
+    """
+    regex = re.escape(pattern)
+    regex = regex.replace(r"\*", ".*").replace(r"\?", ".")
+    return bool(re.fullmatch(regex, value))
+
+
+def _get_license_info(purge_cache: bool = False) -> dict:
+    """Get license information, downloading it if necessary, and parse it into a dictionary.
+
+    Args:
+        purge_cache: If True, re-download the license information even if the file exists.
+
+    Returns:
+        License information as a dictionary.
+    """
+    license_file = settings.STATIC / settings.LICENSE_INFO_FILE
+
+    if purge_cache or not license_file.exists():
+        # Download license information from URL and save to static folder
+        try:
+            res = requests.get(settings.LICENSE_INFO_URL)
+            res.raise_for_status()
+            license_data = res.json()
+            # Convert license list to a dictionary for easier lookup, keeping only licenseId, name, and url
+            parsed_license_data = {
+                lic["licenseId"]: {"id": lic["licenseId"], "name": lic["name"], "url": lic["reference"]}
+                for lic in license_data.get("licenses", [])
+            }
+            license_file = settings.STATIC / settings.LICENSE_INFO_FILE
+            _write_json(license_file, parsed_license_data)
+            logger.info("Downloaded license information to '%s'", license_file)
+        except Exception:
+            logger.exception("Failed to download license information from '%s'", settings.LICENSE_INFO_URL)
+
+    # Load license information from file
+    try:
+        with license_file.open(encoding="utf-8") as f:
+            license_info = json.load(f)
+    except Exception:
+        logger.exception("Failed to load license information from '%s'", license_file)
+        return {}
+
+    return license_info
+
+
+def _translate_licenses(item: Any, license_info: dict, res_type: str, fileid: str) -> None:
+    """Recursively translate license IDs in the item to full license info.
+
+    Args:
+        item: The item (dict, list, or other) to process.
+        license_info: License information dictionary.
+        res_type: Type of the resource (used for logging).
+        fileid: The file ID (resource ID) (used for logging).
+    """
+    if isinstance(item, dict):
+        license_value = item.get("license")
+        if isinstance(license_value, str) and license_value:
+            if license_value == settings.LICENSE_OTHER_NAME:
+                license_name = item.get("license_other", "")
+                if not license_name:
+                    logger.warning(
+                        "LicenseRef-Other missing 'license_other' field (resource: '%s/%s')", res_type, fileid
+                    )
+                    license_name = "Other"
+                item["license"] = {"id": settings.LICENSE_OTHER_NAME, "name": license_name, "url": ""}
+                item.pop("license_other", None)
+            else:
+                license_data = license_info.get(license_value)
+                if license_data:
+                    item["license"] = license_data
+                else:
+                    item["license"] = {"id": license_value, "name": license_value, "url": ""}
+                    logger.warning(
+                        "License ID '%s' not found in license info (resource: '%s/%s')", license_value, res_type, fileid
+                    )
+
+        for key, value in list(item.items()):
+            if key == "license":
+                continue
+            _translate_licenses(value, license_info, res_type, fileid)
+    elif isinstance(item, list):
+        for elem in item:
+            _translate_licenses(elem, license_info, res_type, fileid)
+
+
+def _write_json(filename: Path, data: dict) -> None:
     """Write data as JSON to a temporary file, and afterwards move the file into place.
 
     Args:
@@ -435,6 +596,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--resource-paths", type=str, help="Comma-separated paths to the resources to update (format: 'type/id')"
     )
+    parser.add_argument(
+        "--purge-license-cache",
+        action="store_true",
+        help="Re-download the license information even if the file exists",
+    )
 
     # Parse command line arguments
     args = parser.parse_args()
@@ -444,4 +610,5 @@ if __name__ == "__main__":
         debug=args.debug,
         offline=args.offline,
         validate=args.validate,
+        purge_license_cache=args.purge_license_cache,
     )

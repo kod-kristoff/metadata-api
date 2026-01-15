@@ -3,8 +3,22 @@
 All notable API changes will be documented in this file. The format is based on [Keep a
 Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [unreleased]
+## [3.3.0] - 2026-01-15
 
+### Added
+
+- Added atomic tracking of pending cache renewal tasks using Redis to prevent overload.
+- Added support for wildcards using simple glob-style patterns (`*` and `?`) in collection resource references.
+- Added support for type prefixes in collection resource references (e.g. `corpus/*`).
+- Added `purge-license-cache` query parameter to `/renew-cache` route to allow re-downloading license information
+  from [SPDX](https://github.com/spdx/license-list-data) before parsing YAML files.
+
+### Changed
+
+- Improved error messages from `gen_pids.py` and `parse_yaml.py` for better clarity.
+- All `license` fields in the metadata are now transformed into objects containing `id`, `name`, and `url` fields with
+  license details from [SPDX](https://github.com/spdx/license-list-data).
+- Moved batch programs from `tmp_scripts/` to `batch_jobs/` directory and refactored code in `metadata_util.py`.
 
 ## [3.2.0] - 2025-12-03
 
@@ -87,7 +101,7 @@ Please refer to the git commit log for more information.
 - Added a route for listing utilities: `/utilities`
 - Added a script for generating PIDs and registering resources at Datacite.
 
-[unreleased]: https://github.com/spraakbanken/metadata-api/compare/v3.2.0...dev
+[3.3.0]: https://github.com/spraakbanken/metadata-api/releases/tag/v3.3.0
 [3.2.0]: https://github.com/spraakbanken/metadata-api/releases/tag/v3.2.0
 [3.1]: https://github.com/spraakbanken/metadata-api/releases/tag/v3.1
 [3.0]: https://github.com/spraakbanken/metadata-api/releases/tag/v3.0

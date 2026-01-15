@@ -3,8 +3,9 @@
 import json
 import logging
 from copy import deepcopy
-from typing import Any
+from typing import Any, cast
 
+import redis
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -18,6 +19,9 @@ from metadata_api.tasks import renew_cache_task
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Redis client for managing pending renew-cache tasks
+redis_client = redis.Redis.from_url(settings.CELERY_BROKER_URL)
 
 
 # ------------------------------------------------------------------------------
@@ -170,20 +174,33 @@ def _renew_cache(
     resource_paths: str | None,
     debug: bool,
     offline: bool,
-    payload: dict | None,
+    payload: dict | None = None,
+    purge_license_cache: bool = False,
 ) -> JSONResponse:
-    """Shared renew-cache logic for GET/POST routes."""
     paths_list = resource_paths.split(",") if resource_paths else None
+
+    # Do atomic increment of pending counter
+    logger.info("Pending renew-cache tasks: %s", cast(int, redis_client.get(settings.PENDING_KEY)) or 0)
+    pending = cast(int, redis_client.incr(settings.PENDING_KEY))
+    if pending > settings.MAX_PENDING:
+        # Too many pending tasks, roll back the increment
+        redis_client.decr(settings.PENDING_KEY)
+        raise HTTPException(status_code=409, detail="Too many cache renewals queued. Try again later.")
+
     try:
-        task = renew_cache_task.delay(
-            request_method=request_method,
-            resource_paths=paths_list,
-            debug=debug,
-            offline=offline,
-            payload=payload if request_method == "POST" else None,
-        )
+        task = renew_cache_task.apply_async(kwargs={
+            "request_method": request_method,
+            "resource_paths": paths_list,
+            "debug": debug,
+            "offline": offline,
+            "payload": payload if request_method == "POST" else None,
+            "purge_license_cache": purge_license_cache,
+        })
     except Exception as e:
+        # Roll back the slot if enqueue failed
+        redis_client.decr(settings.PENDING_KEY)
         raise HTTPException(status_code=500, detail=str(e)) from e
+
     return JSONResponse({"task_id": task.id, "message": "Cache renewal triggered in background."})
 
 
@@ -202,13 +219,18 @@ def renew_cache_get(
     ),
     debug: bool = Query(default=False, description="If true, log debug info while parsing YAML files."),
     offline: bool = Query(default=False, description="If true, skip getting file info for downloadables."),
+    purge_license_cache: bool = Query(
+        default=False,
+        alias="purge-license-cache",
+        description="If true, re-download the license information before parsing YAML files.",
+    ),
 ) -> JSONResponse:
     """Trigger cache renewal as a background job (GET).
 
     Resources specified in the "resource-paths" query parameter will be reprocessed. If no resources are specified, all
     resources are reprocessed.
     """
-    return _renew_cache("GET", resource_paths, debug, offline, payload=None)
+    return _renew_cache("GET", resource_paths, debug, offline, purge_license_cache=purge_license_cache)
 
 
 @router.post(

@@ -17,6 +17,9 @@ This project contains the following main components:
 - [**`gen_pids.sh`**](gen_pids.sh) - A shell script that runs periodically on the server (via cron) and calls
   [`gen_pids.py`](/gen_pids/gen_pids.py).
 
+Furthermore there are some scripts in the `batch_jobs/` directory that are used for batch processing of resources, e.g.
+for adding new fields to all metadata YAML files or for extracting information.
+
 ## Logging
 
 Logging is configured via environment variables in `metadata_api/settings.py`. Important variables:
@@ -110,8 +113,9 @@ to install the dependencies. Don't forget to add your own configuration to the a
   stopasgroup=true
 
   [program:metadata-celery]
-  command=%(ENV_HOME)s/metadata-api/dev/.venv/bin/celery -A metadata_api.tasks worker --loglevel=INFO
+  command=%(ENV_HOME)s/metadata-api/dev/.venv/bin/celery -A metadata_api.tasks worker -P solo --loglevel=INFO
   directory=%(ENV_HOME)s/metadata-api/dev/
+  stopwaitsecs=600
   redirect_stderr=true
   stopasgroup=true
   killasgroup=true

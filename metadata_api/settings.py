@@ -28,9 +28,15 @@ class Settings(BaseSettings):
         "analyses": "analysis.json",
         "utilities": "utility.json",
     }
-    # Resource texts file and collections file (relative to "static" directory)
+    # Other files relative to "static" directory
     RESOURCE_TEXTS_FILE: str = "resource-texts.json"
     COLLECTIONS_FILE: str = "collection.json"
+    LICENSE_INFO_FILE: str = "license-info.json"
+
+    # URL to SPDX licenses JSON data
+    LICENSE_INFO_URL: str = "https://raw.githubusercontent.com/spdx/license-list-data/refs/heads/main/json/licenses.json"
+    # Name used for licenses that are not listed in the above license info
+    LICENSE_OTHER_NAME: str = "LicenseRef-Other"
 
     # Absolute path to directory containing the metadata yaml files (https://github.com/spraakbanken/metadata)
     METADATA_DIR: Path = Path("/home/fksbwww/metadata-api/dev/metadata")
@@ -44,6 +50,8 @@ class Settings(BaseSettings):
 
     # Celery settings
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    PENDING_KEY: str = "metadata_api:renew_cache:pending"  # Redis key to track pending cache renewal tasks
+    MAX_PENDING: int = 3  # Maximum number of pending cache renewal tasks
 
     # Caching settings
     MEMCACHED_SERVER: str = ""  # e.g. "localhost:11211". Set to "" to disable caching
