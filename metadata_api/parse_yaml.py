@@ -501,7 +501,7 @@ def _get_license_info(purge_cache: bool = False) -> dict:
             license_data = res.json()
             # Convert license list to a dictionary for easier lookup, keeping only licenseId, name, and url
             parsed_license_data = {
-                lic["licenseId"]: {"id": lic["licenseId"], "name": lic["name"], "url": lic["detailsUrl"]}
+                lic["licenseId"]: {"id": lic["licenseId"], "name": lic["name"], "url": lic["reference"]}
                 for lic in license_data.get("licenses", [])
             }
             license_file = settings.STATIC / settings.LICENSE_INFO_FILE
